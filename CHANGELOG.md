@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- 调用方写了 `max_tokens` 就原样出站，不再被 `compatibility.min_max_tokens` 抬高。没写时用模型目录的 `max_tokens_default`（例如 Haiku 5.5 为 100000，Sonnet 5 为 64000），不再一律填 128000。超过该模型 `max_tokens_cap` 仍会下调。`enabled` thinking 的 `budget_tokens` 不小于 `max_tokens` 时，仍用下限配置值补出合法间隔。
+- 没写 `max_tokens` 时用模型目录的 `max_tokens_default`（例如 Haiku 5.5 为 100000，Sonnet 5 为 64000），不再一律填 128000。写了且低于 `compatibility.min_max_tokens.value` 时默认仍抬到该值；模式「不改」或 `no_raise` / 面板「不抬升」则不抬。超过该模型 `max_tokens_cap` 仍会下调。`enabled` thinking 的 `budget_tokens` 不小于 `max_tokens` 时，仍用该配置值只补 thinking 合法间隔。
 
 ## 1.4.038 — 2026-11-03
 
