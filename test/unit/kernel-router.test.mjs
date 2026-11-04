@@ -17,7 +17,7 @@ import {
   rememberRustHealth,
   peekRustHealth,
 } from '../../src/lib/transport/kernel-router.mjs'
-import { rustKernelBusy, rustKernelReachable } from '../../src/lib/transport/rust-kernel-client.mjs'
+import { rustKernelBusy, rustKernelReachable, kernelStalls } from '../../src/lib/transport/rust-kernel-client.mjs'
 import {
   ensureRustKernel,
   writeKernelConfig,
@@ -44,6 +44,7 @@ import { socksUidFor } from '../../src/lib/vm/vm-runtime.mjs'
 
 const unix = process.platform !== 'win32'
 const unixTest = unix ? test : test.skip
+test.afterEach(() => kernelStalls.clear())
 
 test('wrap system error is not a credential ensure; 401 still is', () => {
   assert.equal(
@@ -351,6 +352,8 @@ unixTest('failed Go credential ensure is not followed by a blind Rust retry', as
   }
 })
 unixTest('unhealthy rust does not fall back to go', async () => {
+  const previous = process.env.KIN_KERNEL_BIN
+  process.env.KIN_KERNEL_BIN = '/bin/true'
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-kernel-fb-'))
   const slot = path.join(root, 'vm-01')
   const runDir = path.join(slot, 'run')
@@ -417,10 +420,15 @@ unixTest('unhealthy rust does not fall back to go', async () => {
       timeoutMs: 3000,
     })
     assert.equal(strict.engine, 'rust')
-    assert.equal(strict.transportError, true)
+    assert.equal(kernelStalls.has('vm-01'), true)
+    assert.equal(strict.transportError, false, 'an unreachable cancel quarantines before another dispatch')
+    assert.equal(strict.status, 503)
+    assert.equal(strict.body.error.code, 'kernel_unavailable')
   } finally {
     await new Promise((resolve) => server.close(resolve))
     fs.rmSync(root, { recursive: true, force: true })
+    if (previous == null) delete process.env.KIN_KERNEL_BIN
+    else process.env.KIN_KERNEL_BIN = previous
   }
 })
 

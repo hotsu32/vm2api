@@ -194,7 +194,8 @@ export function createKernelWatchdog({
       health?.healthy !== false &&
       health?.recovering !== true &&
       health?.ready_slots != null &&
-      Number(health.ready_slots) === 0 &&
+      Number.isFinite(Number(health.ready_slots)) &&
+      Number(health.ready_slots) >= 0 &&
       Number(health.cli_pid) > 0 &&
       knownCounters &&
       Number(m.pending) + Number(m.running) > 0 &&
@@ -206,7 +207,10 @@ export function createKernelWatchdog({
         rustKernelProcessUp(health) &&
         health?.healthy !== false &&
         health?.recovering !== true &&
-        Number(health?.ready_slots) > 0
+        Number(health?.ready_slots) > 0 &&
+        knownCounters &&
+        Number(m.pending) === 0 &&
+        Number(m.running) === 0
       )
         kernelStalls.delete(vm.id)
       return false
@@ -223,7 +227,7 @@ export function createKernelWatchdog({
     if (!kernelStalls.has(vm.id)) {
       kernelStalls.set(vm.id, 'kernel orphan stall: no owned hops or occupancy change')
       console.warn(
-        `[kernel-watchdog] ${vm.id} quarantined: ready=0 pending=${m.pending} running=${m.running} owned=0 age_ms=${at - observation.since}`,
+        `[kernel-watchdog] ${vm.id} quarantined: ready=${health.ready_slots} pending=${m.pending} running=${m.running} owned=0 age_ms=${at - observation.since}`,
       )
     }
     return true

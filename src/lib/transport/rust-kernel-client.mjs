@@ -32,8 +32,15 @@ export function withRustKernelExec(exec) {
   }
 }
 
-function remapVia(result) {
+function remapVia(result, exec = null) {
   if (!result || typeof result !== 'object') return result
+  const vmId = exec?.vmId || exec?.vm?.id
+  // An unreachable cancel endpoint leaves ownership unresolved. Drain new
+  // dispatch now; the watchdog still requires its idle observation before recovery.
+  // A reachable legacy 404 is not evidence of a wedged native kernel.
+  if (vmId && result.kernelCancellation?.transportError === true) {
+    kernelStalls.set(vmId, 'kernel cancellation unreachable; awaiting native cleanup')
+  }
   return {
     ...result,
     via: String(result.via || 'go-worker').replace(/go-worker/g, 'rust-kernel'),
@@ -41,11 +48,11 @@ function remapVia(result) {
 }
 
 export async function callRustKernel(opts = {}) {
-  return remapVia(await callGoWorker({ ...opts, exec: withRustKernelExec(opts.exec) }))
+  return remapVia(await callGoWorker({ ...opts, exec: withRustKernelExec(opts.exec) }), opts.exec)
 }
 
 export async function streamRustKernel(opts = {}) {
-  return remapVia(await streamGoWorker({ ...opts, exec: withRustKernelExec(opts.exec) }))
+  return remapVia(await streamGoWorker({ ...opts, exec: withRustKernelExec(opts.exec) }), opts.exec)
 }
 
 export async function postRustKernelTelemetryEvent(exec, event, options = {}) {

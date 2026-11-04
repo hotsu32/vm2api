@@ -182,11 +182,13 @@ function cancelOnAbort(exec, signal, requestId) {
         console[accepted ? 'info' : 'warn'](
           `[kernel-cancel] ${exec?.vmId || 'slot'} cause=${cause} status=${res.statusCode} accepted=${accepted}`,
         )
+        return { accepted, status: res.statusCode, transportError: false }
       })
       .catch((error) => {
         console.warn(
           `[kernel-cancel] ${exec?.vmId || 'slot'} cause=${cause} failed=${error?.code || 'transport_error'}`,
         )
+        return { accepted: false, status: 0, transportError: true }
       })
     return pending
   }
@@ -608,11 +610,13 @@ export async function callGoWorker({
       threadBetas: prepared.thread,
     })
   } catch (error) {
-    if (error.status !== 413) await cancellation.cancel(signal?.aborted ? 'client_abort' : 'hop_failure')
+    const kernelCancellation =
+      error.status !== 413 ? await cancellation.cancel(signal?.aborted ? 'client_abort' : 'hop_failure') : null
     return {
       ok: false,
       status: error.status === 413 ? 413 : 0,
       via: 'go-worker',
+      kernelCancellation,
       body: {
         type: 'error',
         error: {
@@ -937,12 +941,13 @@ export async function streamGoWorker({
       const complete = !lastError && isCompleteAssistantMessage({ body: assembled, stopReason, sawMessageStop })
       if (!committed && complete) await flushCommit()
       const terminalState = complete ? 'verified' : 'incomplete'
-      if (!complete && !lastError) await cancellation.cancel('incomplete_stream')
+      const kernelCancellation = !complete && !lastError ? await cancellation.cancel('incomplete_stream') : null
       const rateHeaders = mergeRateLimitHeaders({ ...sseRateHeaders, ...headers, ...trailers })
       return restoreUncommittedHop({
         ok: response.statusCode === 200 && !lastError && complete,
         status: response.statusCode || 0,
         via: 'go-worker-stream',
+        kernelCancellation,
 
         body: lastError || assembled || { type: 'message', role: 'assistant', content: [] },
         headers: rateHeaders,
@@ -962,10 +967,12 @@ export async function streamGoWorker({
       if (idleTimer) clearInterval(idleTimer)
     }
   } catch (error) {
-    if (error.status !== 413) await cancellation.cancel(signal?.aborted ? 'client_abort' : 'hop_failure')
+    const kernelCancellation =
+      error.status !== 413 ? await cancellation.cancel(signal?.aborted ? 'client_abort' : 'hop_failure') : null
     if (signal?.aborted) {
       return clientCancelledResult({
         via: 'go-worker-stream',
+        kernelCancellation,
         ...timing.snapshot(),
         committed,
       })
@@ -974,6 +981,7 @@ export async function streamGoWorker({
       ok: false,
       status: error.status === 413 ? 413 : 0,
       via: 'go-worker-stream',
+      kernelCancellation,
       body: {
         type: 'error',
         error: {

@@ -1,7 +1,8 @@
 # Orphaned native-kernel recovery
 
 This control-plane fix addresses a live kernel reporting `healthy=true`,
-`ready_slots=0`, unchanged native occupancy, but no gateway-owned requests.
+unchanged native occupancy, but no gateway-owned requests. The kernel can
+have zero ready slots or still advertise spare slots while its CLI is blocked.
 It does not change account priority, affinity, quota or per-account concurrency.
 The native kernel is a pinned binary: its initial slot-release defect is not
 claimed fixed by this JavaScript change.
@@ -15,13 +16,18 @@ Concurrent abort/error paths share a single cancellation attempt. HTTP status
 and acceptance are logged without request IDs, prompts or credentials. A 2xx
 acknowledgement is acceptance, not proof of completed native cleanup; a 404 or
 negative acknowledgement is visible and never masks the original error.
+If the Rust cancellation endpoint itself cannot be reached, new dispatch is
+quarantined immediately and the request does not retry into that kernel.
+Owned sibling jobs are not killed; the watchdog still waits for its full idle
+observation window before restarting. A reachable legacy 404 alone does not
+establish a stall. Healthy native idle clears this precautionary quarantine.
 
 ## Watchdog
 
 `routing.kernel_watchdog.orphan_stall_sec` defaults to **900 seconds** (minimum
 60). At least three consecutive samples must show all of:
 
-- kernel reachable, healthy, not recovering, live CLI, zero ready slots;
+- kernel reachable, healthy, not recovering, live CLI, known ready-slot count;
 - known native pending/running/payload counters with nonzero occupancy;
 - unchanged CLI identity and those occupancy counters;
 - zero pool reservations and zero tracked inference hops for this VM.
@@ -41,7 +47,8 @@ not `ensure()` (which deliberately leaves healthy busy kernels alone). Existing
 restart spacing/window/budget applies; exhaustion faults the VM instead of
 creating an unbounded restart loop. KVM recovery restarts the guest kernel
 service, not the runner or unrelated VMs. A fresh healthy/ready observation
-clears quarantine; only real readiness clears the spent orphan-fault budget.
+with zero native pending/running clears quarantine; spare slots alone do not
+clear the spent orphan-fault budget.
 
 The diagnostic watchdog check exposes `kernel_stalled` while quarantined.
 New orphan observations and cancel outcomes are available in control logs.

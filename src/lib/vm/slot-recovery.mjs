@@ -305,13 +305,7 @@ function watchdogCheck(vm, engine, watchdog, internal) {
     return check('watchdog', label, 'error', 'kernel_faulted', `自动重启已用尽，已停止调度${why}`)
   }
   if (kernelStalls.has(vm.id)) {
-    return check(
-      'watchdog',
-      label,
-      'warn',
-      'kernel_stalled',
-      '内核会话槽持续耗尽且无在途业务，已暂停调度并等待有界恢复',
-    )
+    return check('watchdog', label, 'warn', 'kernel_stalled', '内核任务清理异常，已暂停调度并等待有界恢复')
   }
   const n = watchdog?.restartsInWindow?.(vm.id) || 0
   if (n) return check('watchdog', label, 'warn', 'watchdog_restarting', `近一小时已自动重启容器 ${n} 次`)

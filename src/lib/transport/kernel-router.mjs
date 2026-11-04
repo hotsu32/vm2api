@@ -278,7 +278,7 @@ async function runHop({ mode, opts }) {
     noteWrapHop(opts.exec)
     if (opts.signal?.aborted || isClientCancelledResult(result)) {
       result = clientCancelledResult(result)
-    } else if (result.transportError === true && result.committed !== true) {
+    } else if (result.transportError === true && result.committed !== true && !kernelStalls.has(cacheKey(opts.exec))) {
       result = await send(opts)
       result = { ...result, rust_transport_retried: true }
       noteWrapHop(opts.exec)

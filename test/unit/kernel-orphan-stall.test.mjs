@@ -65,7 +65,13 @@ test('orphaned full kernel is quarantined then force-recovered with bounded retr
   assert.equal(client.kernelFaults.has(fx.vm.id), true)
   await fx.tick(200000)
   assert.equal(fx.calls.length, 2)
-  fx.setStatus({ ok: true, healthy: true, ready_slots: 20, cli_pid: 1500 })
+  fx.setStatus({
+    ok: true,
+    healthy: true,
+    ready_slots: 20,
+    cli_pid: 1500,
+    memory: { pending: 0, running: 0, inflight_payload: 0 },
+  })
   await fx.tick(220000)
   assert.equal(client.kernelStalls.has(fx.vm.id), false)
   assert.equal(client.kernelFaults.has(fx.vm.id), false)
@@ -130,4 +136,18 @@ test('tracked diagnostic hops protect long native work even without a pool reser
   } finally {
     endWrapHop(exec)
   }
+})
+
+test('unused ready slots do not hide orphaned work that blocks the CLI', async (t) => {
+  const fx = fixture(t)
+  fx.setStatus({ ...fx.status(), ready_slots: 10, memory: { pending: 10, running: 1, inflight_payload: 1000 } })
+  for (const at of [0, 20000, 40000, 60000, 80000]) await fx.tick(at)
+  assert.deepEqual(fx.calls, [80000])
+  assert.equal(client.kernelStalls.has(fx.vm.id), true)
+  // Free slots alone are not proof of cleanup; the lingering running job remains quarantined.
+  await fx.tick(100000)
+  assert.equal(client.kernelStalls.has(fx.vm.id), true)
+  fx.setStatus({ ...fx.status(), ready_slots: 20, memory: { pending: 0, running: 0, inflight_payload: 0 } })
+  await fx.tick(120000)
+  assert.equal(client.kernelStalls.has(fx.vm.id), false)
 })

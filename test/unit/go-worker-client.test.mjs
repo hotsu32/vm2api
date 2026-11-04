@@ -17,7 +17,7 @@ import {
 import { prepareCliHopBody } from '../../src/lib/protocol/outbound-attempt.mjs'
 import { callerAutoCompactWindow, defaultSeedPolicy, sanitizeInboundBody } from '../../src/lib/protocol/seed-policy.mjs'
 import { extractOpenaiUsage } from '../../src/lib/protocol/openai-usage.mjs'
-import { callRustKernel, rustKernelHealth } from '../../src/lib/transport/rust-kernel-client.mjs'
+import { callRustKernel, rustKernelHealth, kernelStalls } from '../../src/lib/transport/rust-kernel-client.mjs'
 import { callCodexKernel, streamCodexKernel } from '../../src/lib/transport/codex-kernel-client.mjs'
 import { forwardApi, readApiJson } from '../../src/lib/transport/api-kernel-client.mjs'
 
@@ -1454,6 +1454,30 @@ unixTest('a successful nonstream hop never sends cancellation', async () => {
     await fx.close()
   }
 })
+
+for (const unreachable of [true, false]) {
+  unixTest(
+    `Rust cancellation ${unreachable ? 'transport failure drains the VM' : 'legacy 404 does not claim a stall'}`,
+    async () => {
+      const fx = await fixture((req, res) => {
+        req.resume()
+        if (req.url === '/internal/v1/cancel') {
+          if (unreachable) res.destroy()
+          else res.writeHead(404).end('{"ok":false}')
+        }
+      })
+      fx.exec.vm.runtime.kernel_socket = fx.exec.vm.runtime.worker_socket
+      try {
+        const result = await callRustKernel({ exec: fx.exec, envelope: { body: {} }, timeoutMs: 40 })
+        assert.equal(result.body.error.code, 'worker_timeout')
+        assert.equal(kernelStalls.has(fx.exec.vmId), unreachable)
+      } finally {
+        kernelStalls.delete(fx.exec.vmId)
+        await fx.close()
+      }
+    },
+  )
+}
 
 unixTest('Codex clients enforce the panel limit on their serialized envelope', async () => {
   let requests = 0
