@@ -12,7 +12,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { clusterManager, vmNodeId } from '../cluster/placement.mjs'
 import { containerLogs, inspectContainerOrNull } from '../cluster/docker-remote.mjs'
 import { slotEgressNames } from '../cluster/remote-slot.mjs'
-import { kernelFaults, rustKernelHealth, toPublicKernelHealth } from '../transport/rust-kernel-client.mjs'
+import { kernelFaults, kernelStalls, rustKernelHealth, toPublicKernelHealth } from '../transport/rust-kernel-client.mjs'
 import { codexKernelHealth } from '../transport/codex-kernel-client.mjs'
 import { codexKernelTracked } from '../transport/codex-kernel-supervisor.mjs'
 import {
@@ -303,6 +303,15 @@ function watchdogCheck(vm, engine, watchdog, internal) {
   if (fault) {
     const why = internal ? `：${redactSecrets(fault)}` : ''
     return check('watchdog', label, 'error', 'kernel_faulted', `自动重启已用尽，已停止调度${why}`)
+  }
+  if (kernelStalls.has(vm.id)) {
+    return check(
+      'watchdog',
+      label,
+      'warn',
+      'kernel_stalled',
+      '内核会话槽持续耗尽且无在途业务，已暂停调度并等待有界恢复',
+    )
   }
   const n = watchdog?.restartsInWindow?.(vm.id) || 0
   if (n) return check('watchdog', label, 'warn', 'watchdog_restarting', `近一小时已自动重启容器 ${n} 次`)

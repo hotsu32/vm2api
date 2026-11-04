@@ -9,7 +9,7 @@ import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
 import { FailoverRunner } from '../../src/lib/pool/failover-runner.mjs'
 import { PanelUserStore } from '../../src/lib/admin/panel-users.mjs'
 import { persistVmOwner } from '../../src/lib/vm/vm-registry.mjs'
-import { kernelFaults } from '../../src/lib/transport/rust-kernel-client.mjs'
+import { kernelFaults, kernelStalls } from '../../src/lib/transport/rust-kernel-client.mjs'
 import {
   applyCrsIdentityReplace,
   rebuildOutboundSession,
@@ -249,6 +249,30 @@ test('an exhausted kernel is excluded even when the conversation is pinned to it
   assert.equal(selected.ok, true)
   assert.equal(selected.vmId, 'vm-01')
   selected.release()
+})
+
+test('orphan quarantine excludes a sticky home and rejects an already selected reservation', async (t) => {
+  const root = project()
+  t.after(() => {
+    kernelStalls.delete('vm-02')
+    fs.rmSync(root, { recursive: true, force: true })
+  })
+  const pool = scheduler(root, {
+    stickyRouter: { resolve: () => ({ vmId: 'vm-02', accountId: 'account-2' }) },
+  })
+  const before = await pool.selectAndReserve({ model: 'claude-test', stickyKey: 'stall-test', allowWait: false })
+  assert.equal(before.vmId, 'vm-02')
+  before.release()
+  kernelStalls.set('vm-02', 'orphan stall')
+  assert.equal(pool.admissionSnapshot(before), null, 'atomic reservation rechecks quarantine')
+  const during = await pool.selectAndReserve({ model: 'claude-test', stickyKey: 'stall-test', allowWait: false })
+  assert.equal(during.ok, true)
+  assert.equal(during.vmId, 'vm-01')
+  during.release()
+  kernelStalls.delete('vm-02')
+  const after = await pool.selectAndReserve({ model: 'claude-test', stickyKey: 'stall-test', allowWait: false })
+  assert.equal(after.vmId, 'vm-02')
+  after.release()
 })
 
 test('account and model cooldowns remove only affected candidates', async (t) => {

@@ -10,6 +10,7 @@
 import fs from 'node:fs'
 import {
   kernelFaults,
+  kernelStalls,
   rustKernelHealth,
   rustKernelNeedsRestart,
   rustKernelProcessUp,
@@ -17,6 +18,8 @@ import {
 } from './rust-kernel-client.mjs'
 import {
   ensureRustKernel,
+  restartRustKernel,
+  wrapHopInflight,
   readExistingKernelConfig,
   dataplaneUsesCcNode,
   WRAP_SLOT_MAX,
@@ -73,6 +76,8 @@ export const DEFAULT_KERNEL_WATCHDOG = Object.freeze({
   // Wait before each container restart, including the first one.
   restart_backoff_sec: Object.freeze([60, 300, 900]),
   restart_window_sec: 3600,
+  // Longer than the standard first-byte/session-idle budgets. Not a request timeout.
+  orphan_stall_sec: 900,
 })
 
 function clampInt(value, min, max, fallback) {
@@ -91,6 +96,7 @@ export function normalizeKernelWatchdogConfig(raw = {}) {
     timeout_ms: clampInt(raw.timeout_ms, 3000, 60_000, DEFAULT_KERNEL_WATCHDOG.timeout_ms),
     restart_backoff_sec: backoff.length ? backoff : [...DEFAULT_KERNEL_WATCHDOG.restart_backoff_sec],
     restart_window_sec: clampInt(raw.restart_window_sec, 60, 86_400, DEFAULT_KERNEL_WATCHDOG.restart_window_sec),
+    orphan_stall_sec: clampInt(raw.orphan_stall_sec, 60, 86_400, DEFAULT_KERNEL_WATCHDOG.orphan_stall_sec),
   }
 }
 
@@ -145,6 +151,9 @@ export function createKernelWatchdog({
   getRouting = null,
   homeDirFor,
   ensure = ensureRustKernel,
+  restart = restartRustKernel,
+  // Unknown ownership must never authorize orphan recovery. Server supplies all pool reservations.
+  getInflight = () => null,
   health = rustKernelHealth,
   observeRuntime = observeWatchdogContainer,
   onFault = null,
@@ -163,7 +172,62 @@ export function createKernelWatchdog({
   const held = new Set()
   // vmId -> this tick's pending check/restart, so hold() can wait for it to settle.
   const inflight = new Map()
+  const orphanObservations = new Map()
   let healingBridges = false
+
+  function ownedHops(vm, exec) {
+    const owned = getInflight(vm)
+    if (owned == null || !Number.isFinite(Number(owned)) || Number(owned) < 0) return null
+    return Math.max(Number(owned), wrapHopInflight(exec))
+  }
+
+  function orphanStalled(vm, exec, health) {
+    const at = now()
+    const m = health?.memory
+    const knownCounters =
+      m &&
+      ['pending', 'running', 'inflight_payload'].every(
+        (key) => m[key] != null && Number.isFinite(Number(m[key])) && Number(m[key]) >= 0,
+      )
+    const suspect =
+      rustKernelProcessUp(health) &&
+      health?.healthy !== false &&
+      health?.recovering !== true &&
+      health?.ready_slots != null &&
+      Number(health.ready_slots) === 0 &&
+      Number(health.cli_pid) > 0 &&
+      knownCounters &&
+      Number(m.pending) + Number(m.running) > 0 &&
+      ownedHops(vm, exec) === 0
+    if (!suspect) {
+      orphanObservations.delete(vm.id)
+      // Unknown/down health does not prove that a quarantined kernel recovered.
+      if (
+        rustKernelProcessUp(health) &&
+        health?.healthy !== false &&
+        health?.recovering !== true &&
+        Number(health?.ready_slots) > 0
+      )
+        kernelStalls.delete(vm.id)
+      return false
+    }
+    const signature = JSON.stringify([health.cli_pid, health.cli_restarts, m.pending, m.running, m.inflight_payload])
+    const prev = orphanObservations.get(vm.id)
+    const consecutive =
+      prev && prev.signature === signature && at >= prev.at && at - prev.at <= config.interval_sec * 2500
+    const observation = consecutive
+      ? { ...prev, at, samples: prev.samples + 1 }
+      : { signature, since: at, at, samples: 1 }
+    orphanObservations.set(vm.id, observation)
+    if (observation.samples < 3 || at - observation.since < config.orphan_stall_sec * 1000) return false
+    if (!kernelStalls.has(vm.id)) {
+      kernelStalls.set(vm.id, 'kernel orphan stall: no owned hops or occupancy change')
+      console.warn(
+        `[kernel-watchdog] ${vm.id} quarantined: ready=0 pending=${m.pending} running=${m.running} owned=0 age_ms=${at - observation.since}`,
+      )
+    }
+    return true
+  }
 
   function healBridgesOffPath(vms) {
     if (typeof healBridges !== 'function' || healingBridges) return
@@ -228,10 +292,11 @@ export function createKernelWatchdog({
     if (held.has(vm.id)) return
     // cc-node is the crag worker. Restarting a live kernel SIGKILLs it.
     if (dataplaneUsesCcNode(exec) && rustKernelProcessUp(current)) return
-    if (!rustKernelNeedsRestart(current)) {
+    const stalled = orphanStalled(vm, exec, current)
+    if (!rustKernelNeedsRestart(current) && !stalled) {
       // Healthy again after a fault means someone fixed it: start a fresh budget.
       // Plain recovery keeps past attempts so a crash loop stays bounded by the window.
-      if (kernelFaults.delete(vm.id)) restarts.delete(vm.id)
+      if (!kernelStalls.has(vm.id) && kernelFaults.delete(vm.id)) restarts.delete(vm.id)
       // Config convergence, not a failure: outside the restart budget.
       if (kernelSlotMismatch(exec)) {
         const observed = await observeRuntime(vm)
@@ -239,15 +304,20 @@ export function createKernelWatchdog({
       }
       return
     }
-    const reason = current?.unhealthy_reason || current?.error || 'kernel process down'
+    const reason = stalled
+      ? kernelStalls.get(vm.id)
+      : current?.unhealthy_reason || current?.error || 'kernel process down'
     const observed = await observeRuntime(vm)
     if (held.has(vm.id)) return
     // Permission/transport failures and deliberately paused containers never authorize recovery.
     if (!['running', 'missing', 'stopped', 'restarting'].includes(observed?.state)) return
     if (observed.state !== 'running') return reviveDownContainer(vm, observed.state)
+    // Re-check ownership after the asynchronous runtime observation, before any destructive action.
+    if (stalled && ownedHops(vm, exec) !== 0) return
     if (!admitRestart(vm, reason, now())) return
     console.warn(`[kernel-watchdog] ${vm.id} restarting container: ${reason}`)
-    const result = await ensure(exec, { timeoutMs: config.timeout_ms })
+    // ensure() intentionally leaves a live busy kernel alone; a confirmed orphan stall needs a real restart.
+    const result = await (stalled ? restart : ensure)(exec, { timeoutMs: config.timeout_ms })
     if (held.has(vm.id)) return
     // The container itself is gone or exited: a kernel restart cannot help, a full boot can.
     if (result?.reason === 'container_unavailable' && typeof revive === 'function' && vm.status === 'running') {
@@ -323,6 +393,8 @@ export function createKernelWatchdog({
     /** Operator recovery: drop the L5 fault and spent budget so the next failure starts fresh. */
     reset(vmId) {
       const faulted = kernelFaults.delete(vmId)
+      kernelStalls.delete(vmId)
+      orphanObservations.delete(vmId)
       restarts.delete(vmId)
       return { faulted }
     },

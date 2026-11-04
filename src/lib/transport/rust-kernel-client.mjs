@@ -104,6 +104,9 @@ export function rustKernelNeedsRestart(health) {
  */
 export const kernelFaults = new Map()
 
+/** Watchdog-confirmed orphan stalls, quarantined before recovery (not an exhausted restart budget). */
+export const kernelStalls = new Map()
+
 function finiteNumber(value) {
   if (value == null || value === '') return null
   const n = Number(value)

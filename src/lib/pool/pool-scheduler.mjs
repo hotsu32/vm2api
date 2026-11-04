@@ -42,6 +42,7 @@ import { PLATFORM_SCOPE, normalizeOwnerId, vmMatchesOwnerScope, vmOwnerId } from
 import { keyAllowsVm } from '../admin/key-scope.mjs'
 import {
   kernelFaults,
+  kernelStalls,
   rustKernelBusy,
   rustKernelProcessUp,
   rustKernelReachable,
@@ -1349,6 +1350,7 @@ export class PoolScheduler extends EventEmitter {
     }
     // A sticky preference must not bypass exhausted kernel recovery.
     if (kernelFaults.has(vm.id)) return { ok: false, reason: 'kernel_faulted' }
+    if (kernelStalls.has(vm.id)) return { ok: false, reason: 'kernel_stalled' }
     // Node offline or asleep: the relay has no link behind it, a pick would only fail. Back on reconnect.
     if (!vmNodeReady(vm)) return { ok: false, reason: 'node_offline' }
     if (rustKernelBusy(workerStatus)) {
@@ -1713,7 +1715,7 @@ export class PoolScheduler extends EventEmitter {
       return null
     const gate = evaluateSlotGate(vm)
     if (!gate.ok && gate.reason !== 'no_credential' && !(pinned && gate.reason === 'vm_unschedulable')) return null
-    if (!slotHasBoundProxy(vm) || kernelFaults.has(vm.id) || !vmNodeReady(vm)) return null
+    if (!slotHasBoundProxy(vm) || kernelFaults.has(vm.id) || kernelStalls.has(vm.id) || !vmNodeReady(vm)) return null
     const proxySync = evaluateProxySync({
       vm,
       workerProxyEndpoint: readWorkerProxyEndpoint(this.projectRoot, vm.id),

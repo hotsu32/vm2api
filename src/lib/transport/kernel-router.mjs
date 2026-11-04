@@ -15,6 +15,7 @@ import {
   rustKernelBusy,
   isNeedsRefreshResult,
   kernelFaults,
+  kernelStalls,
 } from './rust-kernel-client.mjs'
 import {
   kernelBinPath,
@@ -72,6 +73,8 @@ export async function waitForReadySlot(exec, timeoutMs = DEFAULT_SLOT_WAIT_MS, p
   let last = await rustKernelHealth(exec, { timeoutMs: 400 })
   if (rustKernelReachable(last)) return { ok: true, reason: 'already_up', health: last }
   while (Date.now() < deadline) {
+    if (kernelStalls.has(cacheKey(exec)))
+      return { ok: false, reason: 'kernel_unavailable', error: kernelStalls.get(cacheKey(exec)) }
     await new Promise((resolve) => setTimeout(resolve, gap))
     last = await rustKernelHealth(exec, { timeoutMs: 400 })
     if (rustKernelReachable(last)) return { ok: true, reason: 'slot_ready', health: last }
@@ -185,7 +188,7 @@ async function prepareSlotCredentials(exec) {
 
 async function prepareRust(exec, { ensure, routing, slotWaitMs } = {}) {
   await awaitWrapRecycle(exec)
-  const fault = kernelFaults.get(cacheKey(exec))
+  const fault = kernelFaults.get(cacheKey(exec)) || kernelStalls.get(cacheKey(exec))
   if (fault) return { ok: false, reason: 'kernel_unavailable', error: fault }
   if (typeof ensure === 'function') return ensure(exec)
   await prepareSlotCredentials(exec)
@@ -265,6 +268,9 @@ async function runHop({ mode, opts }) {
     }
   }
   const send = mode === 'stream' ? streamRustKernel : callRustKernel
+  // A watchdog quarantine may have appeared while prepareRust awaited health/credentials.
+  const stall = kernelStalls.get(cacheKey(opts.exec))
+  if (stall) return rustUnavailableResult({ reason: 'kernel_unavailable', error: stall })
   beginWrapHop(opts.exec)
   let result
   try {
