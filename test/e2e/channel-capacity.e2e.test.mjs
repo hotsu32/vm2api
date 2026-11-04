@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { startGateway, api, readTrace } from '../harness.mjs'
 
 test('real server: managed capacity auth, opt-in, zero capacity and disabled-gate fallback', async () => {
-  const gw = await startGateway({ scenario: 'text', mockText: 'pong' })
+  // Make the legacy-unavailable assertion independent of image-provided binaries.
+  const gw = await startGateway({ scenario: 'text', mockText: 'pong', env: { KIN_KERNEL_BIN: '' } })
   try {
     const pool = await api(gw, 'POST', '/api/panel/vm-pools', {
       body: { name: 'capacity-test', vm_ids: ['vm-sim-01'] },
