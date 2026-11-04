@@ -1,0 +1,24 @@
+# Keep the exact official native payload/UI; overlay capacity and recovery together.
+ARG BASE_IMAGE=ghcr.io/dofastted/vm2api@sha256:1200a48924c4b1879b226847208e6615302879abc50d6f990bba99041b2640fa
+FROM ${BASE_IMAGE}
+ARG GIT_REVISION
+LABEL org.opencontainers.image.revision=${GIT_REVISION}
+LABEL tv.chatshare.vm2api.patch="channel-capacity-and-kernel-recovery"
+COPY src/server.mjs /opt/vm2api/src/server.mjs
+COPY src/lib/admin/api-keys.mjs /opt/vm2api/src/lib/admin/api-keys.mjs
+COPY src/lib/admin/routing-runtime.mjs /opt/vm2api/src/lib/admin/routing-runtime.mjs
+COPY src/lib/pool/channel-capacity.mjs /opt/vm2api/src/lib/pool/channel-capacity.mjs
+COPY src/lib/pool/pool-scheduler.mjs /opt/vm2api/src/lib/pool/pool-scheduler.mjs
+COPY src/lib/pool/schedule-state.mjs /opt/vm2api/src/lib/pool/schedule-state.mjs
+COPY src/lib/protocol/channel-capacity.mjs /opt/vm2api/src/lib/protocol/channel-capacity.mjs
+COPY src/lib/protocol/handle-protocol.mjs /opt/vm2api/src/lib/protocol/handle-protocol.mjs
+COPY src/lib/transport/go-worker-client.mjs /opt/vm2api/src/lib/transport/go-worker-client.mjs
+COPY src/lib/transport/kernel-router.mjs /opt/vm2api/src/lib/transport/kernel-router.mjs
+COPY src/lib/transport/kernel-watchdog.mjs /opt/vm2api/src/lib/transport/kernel-watchdog.mjs
+COPY src/lib/transport/rust-kernel-client.mjs /opt/vm2api/src/lib/transport/rust-kernel-client.mjs
+COPY src/lib/vm/slot-recovery.mjs /opt/vm2api/src/lib/vm/slot-recovery.mjs
+RUN node --check src/server.mjs \
+    && node --check src/lib/pool/pool-scheduler.mjs \
+    && node --check src/lib/protocol/channel-capacity.mjs \
+    && node --check src/lib/protocol/handle-protocol.mjs \
+    && node --check src/lib/admin/routing-runtime.mjs
