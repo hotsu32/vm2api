@@ -35,6 +35,7 @@ x-api-key: sk-vm-…
 |------|------|------|--------------|
 | `POST` | `/v1/messages` 或 `/messages` | Anthropic Messages | Anthropic Messages / SSE |
 | `GET` | `/v1/usage` | — | 当前账户 5H/7D，Claude 与 GPT 均可（`unit=percent_used`） |
+| `GET` | `/v1/channel/capacity?model=...` | Claude 池调用 Key | [实时容量快照与可选动态准入](CHANNEL_CAPACITY.md) |
 | `POST` | `/v1/chat/completions` 或 `/chat/completions` | OpenAI Chat | OpenAI Chat / SSE |
 | `POST` | `/v1/completions` 或 `/completions` | OpenAI Completions | OpenAI Completions |
 | `POST` | `/v1/responses` 或 `/responses` | OpenAI Responses | OpenAI Responses |

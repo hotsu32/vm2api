@@ -1785,6 +1785,70 @@ export class PoolScheduler extends EventEmitter {
     return { account }
   }
 
+  /** Pure observation: cached health only; never probe, reserve or repair state. */
+  channelCapacityAccounts({ model, keyScope, ownerScope = PLATFORM_SCOPE }) {
+    const now = Date.now()
+    const vms = listVms(this.projectRoot)
+      .map((v) => getVm(this.projectRoot, v.id))
+      .filter((vm) => vm && !isCodexVm(vm) && vmMatchesOwnerScope(vm, ownerScope) && keyAllowsVm(keyScope, vm))
+    const snapshots = this.runtimeRepo.schedulingSnapshot(vms.map((vm) => accountIdOf(vm, this.projectRoot)))
+    return vms.map((vm) => {
+      const accountId = accountIdOf(vm, this.projectRoot)
+      const executing = this.inflight.get(accountId) || 0
+      const row = { accountId, executing, limit: 0, available: 0 }
+      const state = snapshots.get(accountId)?.state
+      const account = snapshots.get(accountId)?.account
+      if (!accountId || !account) return { ...row, unknown: true }
+      const slotGate = evaluateSlotGate(vm)
+      if (
+        account.status !== 'active' ||
+        vm.status !== 'running' ||
+        (!slotGate.ok && slotGate.reason !== 'no_credential') ||
+        hardBlockOf(state, now)
+      )
+        return row
+      const cache = this.healthCache.get(vm.id)
+      const unknown =
+        typeof this.workerHealth === 'function' &&
+        (!cache ||
+          cache.accountId !== accountId ||
+          now - cache.at >= this.config.worker_health_ttl_ms ||
+          Number(state?.credential_generation || 0) > cache.generation)
+      if (unknown) return { ...row, unknown: true }
+      const candidate = {
+        vmId: vm.id,
+        accountId,
+        model: normalizeModel(model),
+        keyScope,
+        ownerScope,
+        workerStatus: cache?.value,
+      }
+      if (!this.admissionSnapshot(candidate)) return row
+      // Read circuit state without inspect()/view(), which can persist transitions.
+      const circuit = this.unitCircuit?.units?.get(accountId) || state?.model_states?.__circuit
+      if (
+        circuit &&
+        ((circuit.state === 'open' && Number(circuit.openUntil || circuit.open_until) > now) || circuit.probeHeld)
+      )
+        return row
+      const draining = this.accountQuota?.gateZoneOf(accountId, { tier: vmTierOf(vm), account }) === GATE_DRAINING
+      let limit = draining ? Math.min(1, candidate.maxConcurrency) : candidate.maxConcurrency
+      if (circuit && circuit.state !== 'closed') limit = Math.min(limit, 1)
+      const policy = this.accountQuota?.policyFor(account, { tier: vmTierOf(vm) })
+      const rpm = this.accountQuota?.rpmLimitFor(account, policy) || 0
+      const usedRpm = (this.accountQuota?.rpmBuckets.get(accountId) || []).filter((t) => t > now - 60000).length
+      const health = cache?.value
+      const headroom = budgetHeadroom({ account, policy, now })
+      const busy =
+        (rpm > 0 && usedRpm >= rpm) ||
+        rustKernelBusy(health) ||
+        !this.planner.canOpen(vm.id, seatCapOf(vm, this.config.default_session_slots), headroom) ||
+        this.planner.hasSeatWaiters(vm.id) ||
+        this.planner.hasConcWaiters(vm.id)
+      return { ...row, limit, draining, available: busy ? 0 : Math.max(0, limit - executing) }
+    })
+  }
+
   reserve(candidate, { skipQuota = false, pinned = false } = {}) {
     const snapshot = candidate.exec ? this.admissionSnapshot(candidate, { pinned }) : {}
     if (!snapshot) return null

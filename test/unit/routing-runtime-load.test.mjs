@@ -518,6 +518,29 @@ test('PUT /api/panel/routing rejects an invalid vm patch before persist', async 
   assert.match(response.body?.error?.message, /memory/)
 })
 
+test('persistRoutingPatch validates and round-trips channel capacity opt-in', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-routing-capacity-'))
+  const routingFile = path.join(root, 'routing.json')
+  const routingConfig = { concurrency: {}, tiers: {}, codex: { quota: {} } }
+  fs.writeFileSync(routingFile, JSON.stringify(routingConfig))
+  try {
+    const runtime = persistHarness(root, routingFile, routingConfig)
+    const before = fs.readFileSync(routingFile, 'utf8')
+    for (const value of [{}, { key_ids: 'all' }, { key_ids: ['not-a-key'] }]) {
+      await assert.rejects(runtime.persistRoutingPatch({ channel_capacity: value }), {
+        code: 'invalid_channel_capacity',
+      })
+      assert.equal(fs.readFileSync(routingFile, 'utf8'), before)
+    }
+    await runtime.persistRoutingPatch({ channel_capacity: { key_ids: ['key_abcdef', 'key_abcdef'] } })
+    assert.deepEqual(runtimeFor(routingFile).loadRoutingConfig().channel_capacity, { key_ids: ['key_abcdef'] })
+    await runtime.persistRoutingPatch({ channel_capacity: { key_ids: [] } })
+    assert.deepEqual(runtimeFor(routingFile).loadRoutingConfig().channel_capacity, { key_ids: [] })
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 test('persistRoutingPatch round-trips websocket gates and analytics', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-routing-ws-persist-'))
   const routingFile = path.join(root, 'routing.json')

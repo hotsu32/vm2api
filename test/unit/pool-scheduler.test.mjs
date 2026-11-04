@@ -126,6 +126,103 @@ function scheduler(root, extras = {}) {
   })
 }
 
+test('channel capacity reads real quota/health without probes, writes or reservations', async (t) => {
+  const root = project()
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const quota = new AccountQuota({
+    dataDir: path.join(root, 'data'),
+    config: {
+      quota: { block_on_5h: true, block_on_7d: true, critical_band: 0.05, gate_overshoot: 0.05 },
+      tiers: { max: { limit_5h: 0.85, limit_7d: 0.8, max_concurrency: 2 } },
+    },
+  })
+  for (let i = 1; i <= 2; i++) quota.ensure({ account_id: `account-${i}`, vm_id: `vm-0${i}` })
+  const pool = scheduler(root, { accountQuota: quota })
+  const scope = { group_type: 'anthropic', allowed_vms: ['vm-01', 'vm-02'] }
+  for (let i = 1; i <= 2; i++)
+    pool.healthCache.set(`vm-0${i}`, {
+      at: Date.now(),
+      accountId: `account-${i}`,
+      generation: 1,
+      value: { ok: true, credential: { generation: 1, has_access: true } },
+    })
+  const read = () => pool.channelCapacityAccounts({ model: 'claude-opus-5-5', keyScope: scope })
+  pool.workerHealth = async () => {
+    throw new Error('capacity must not probe')
+  }
+  const filesBefore = ['vm-01', 'vm-02'].map((id) => fs.readFileSync(path.join(root, 'vms', `${id}.json`), 'utf8'))
+  assert.deepEqual(
+    read().map((a) => a.limit),
+    [2, 2],
+  )
+  pool.inflight.set('account-1', 2)
+  assert.deepEqual(
+    read().map((a) => [a.limit, a.available]),
+    [
+      [2, 0],
+      [2, 2],
+    ],
+  )
+  pool.inflight.delete('account-1')
+  const setUsage = (id, value) =>
+    quota.ingestHeaders(id, {
+      'anthropic-ratelimit-unified-5h-utilization': String(value),
+      'anthropic-ratelimit-unified-5h-status': 'allowed',
+      'anthropic-ratelimit-unified-5h-reset': String(Math.floor(Date.now() / 1000) + 3600),
+    })
+  setUsage('account-1', 0.8)
+  assert.deepEqual(
+    read().map((a) => a.limit),
+    [1, 2],
+  )
+  setUsage('account-2', 0.8)
+  assert.deepEqual(
+    read().map((a) => a.limit),
+    [1, 1],
+  )
+  setUsage('account-1', 0.9)
+  assert.deepEqual(
+    read().map((a) => a.limit),
+    [0, 1],
+  )
+  setUsage('account-2', 0.9)
+  assert.deepEqual(
+    read().map((a) => a.limit),
+    [0, 0],
+  )
+  setUsage('account-1', 0.1)
+  setUsage('account-2', 0.1)
+  assert.deepEqual(
+    read().map((a) => a.limit),
+    [2, 2],
+  )
+  quota.ingestHeaders('account-1', {
+    'anthropic-ratelimit-unified-7d-utilization': '0.75',
+    'anthropic-ratelimit-unified-7d-status': 'allowed',
+    'anthropic-ratelimit-unified-7d-reset': String(Math.floor(Date.now() / 1000) + 86400),
+  })
+  assert.deepEqual(
+    read().map((a) => a.limit),
+    [1, 2],
+    'weekly drain uses the same quota policy',
+  )
+  quota.ingestHeaders('account-1', { 'anthropic-ratelimit-unified-7d-utilization': '0.85' })
+  assert.deepEqual(
+    read().map((a) => a.limit),
+    [0, 2],
+    'weekly gate leaves the pool',
+  )
+  pool.healthCache.get('vm-02').at = 0
+  assert.equal(read()[1].unknown, true, 'stale health is unknown without probing')
+  assert.equal(pool.inflight.size, 0)
+  assert.equal(pool.planner.seats.size, 0)
+  assert.deepEqual(
+    ['vm-01', 'vm-02'].map((id) => fs.readFileSync(path.join(root, 'vms', `${id}.json`), 'utf8')),
+    filesBefore,
+  )
+  assert.equal(pool.unitCircuit.units.size, 0, 'read-only observation does not initialize circuit state')
+})
+
 test('scheduler skips a slot whose access is expired and has no refresh', async (t) => {
   const root = project()
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
