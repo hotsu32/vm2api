@@ -102,6 +102,7 @@ import { isConsoleEntry, tryServeWebDist } from './lib/http/web-dist.mjs'
 import { createRoutingRuntime } from './lib/admin/routing-runtime.mjs'
 import { createImportCommit } from './lib/oauth/import-commit.mjs'
 import { createHandleProtocol } from './lib/protocol/handle-protocol.mjs'
+import { handleChannelCapacity } from './lib/protocol/channel-capacity.mjs'
 import { createResponsesWsHandler } from './lib/protocol/responses-ws.mjs'
 import { handleUserUsage } from './lib/protocol/user-count-tokens.mjs'
 import { createPanelHandler } from './lib/admin/panel-routes.mjs'
@@ -697,7 +698,7 @@ function rejectAuth(req, res, error) {
   return false
 }
 
-function requireAuth(req, res) {
+function requireAuth(req, res, { capacityQuery = false } = {}) {
   req.presentedApiKey = extractApiKey(req)
   const token = extractPanelToken(req) || req.presentedApiKey
   if (!token) {
@@ -768,7 +769,7 @@ function requireAuth(req, res) {
       }),
     )
   }
-  const gate = apiKeyStore.canAccept(managed.record)
+  const gate = apiKeyStore.canAccept(managed.record, Date.now(), { capacityQuery })
   if (!gate.ok) {
     const type =
       gate.status === 429
@@ -1106,6 +1107,15 @@ const server = http.createServer(async (req, res) => {
       })
     }
 
+    if (req.method === 'GET' && p === '/v1/channel/capacity') {
+      return handleChannelCapacity(req, res, {
+        requireAuth,
+        json,
+        scheduler: poolScheduler,
+        apiKeyStore,
+        routing: routingConfig,
+      })
+    }
     if (req.method === 'GET' && p === '/v1/models') {
       if (!requireAuth(req, res)) return
       if (resolveInferenceBackend(req) === 'api') {

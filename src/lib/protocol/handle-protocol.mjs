@@ -64,6 +64,8 @@ import { loggedReasoningEffort } from './thinking.mjs'
 import { reasoningEffortOf, sessionIdForLog } from './log-fields.mjs'
 import { ownerScopeFromRequest } from '../admin/resource-owner.mjs'
 import { keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
+import { dynamicCapacityEnabled } from '../pool/channel-capacity.mjs'
+import { capacityForRequest, capacityFailure } from './channel-capacity.mjs'
 import {
   resolveInferenceEngine,
   resolveOfficialCcInference,
@@ -1263,9 +1265,35 @@ export function createHandleProtocol(deps) {
     const streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(getRouting(), cfg)
     const managedKey = req.apiKeyRecord || null
     if (managedKey) {
-      const gate = apiKeyStore.acquire(managedKey)
+      let gate
+      try {
+        const dynamic = dynamicCapacityEnabled(getRouting(), managedKey)
+        gate = apiKeyStore.acquire(
+          managedKey,
+          Date.now(),
+          dynamic
+            ? () =>
+                capacityForRequest(req, canonicalBody.model, {
+                  scheduler: typeof deps.getPoolScheduler === 'function' ? deps.getPoolScheduler() : deps.poolScheduler,
+                  apiKeyStore,
+                  routing: getRouting(),
+                })
+            : null,
+        )
+      } catch (error) {
+        const failure = capacityFailure(error)
+        if (failure.status === 503) res.setHeader('Retry-After', '1')
+        return json(res, failure.status, failure.body)
+      }
       if (!gate.ok) {
         stats.errors++
+        if (
+          gate.code === 'channel_capacity_busy' ||
+          gate.code === 'account_pool_exhausted' ||
+          gate.code === 'channel_capacity_unavailable'
+        ) {
+          res.setHeader('Retry-After', '1')
+        }
         return json(res, gate.status, keyGateErrorBody(gate))
       }
     }

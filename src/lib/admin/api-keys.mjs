@@ -16,6 +16,7 @@
  */
 
 import { keyScopeFromRecord, normalizeKeyScope } from './key-scope.mjs'
+import { capacityGate } from '../pool/channel-capacity.mjs'
 import { VmPoolsRepo } from '../db/repos/vm-pools-repo.mjs'
 import crypto from 'node:crypto'
 import { resolveStoreDb } from '../db/database.mjs'
@@ -365,7 +366,7 @@ export class ApiKeyStore {
    * Pre-flight gate for a managed key. Does not acquire concurrency.
    * @returns {{ ok: true } | { ok: false, code, message, status }}
    */
-  canAccept(rec, now = Date.now()) {
+  canAccept(rec, now = Date.now(), { capacityQuery = false } = {}) {
     if (!rec) return { ok: false, code: 'invalid_api_key', message: 'Invalid credentials', status: 401 }
     if (rec.status !== 'active') {
       if (rec.status === 'quota_exhausted') {
@@ -414,7 +415,7 @@ export class ApiKeyStore {
         }
       }
     }
-    if (rec.rpm > 0) {
+    if (!capacityQuery && rec.rpm > 0) {
       const n = this._rpmCount(rec.id, now)
       if (n >= rec.rpm) {
         return {
@@ -427,7 +428,7 @@ export class ApiKeyStore {
       }
     }
     const inflight = this.inflight.get(rec.id) || 0
-    if (rec.max_concurrency > 0 && inflight >= rec.max_concurrency) {
+    if (!capacityQuery && rec.max_concurrency > 0 && inflight >= rec.max_concurrency) {
       return {
         ok: false,
         code: 'api_key_concurrency_limit',
@@ -438,7 +439,7 @@ export class ApiKeyStore {
     }
     // sub2api user-level cap: sum of inflight across all of the owner's keys.
     // The operator (admin) is never capped: its traffic is the platform's own.
-    if (rec.user_id) {
+    if (!capacityQuery && rec.user_id) {
       const owner = (() => {
         try {
           return this.users.getById(rec.user_id)
@@ -466,10 +467,15 @@ export class ApiKeyStore {
     return { ok: true }
   }
 
-  acquire(rec, now = Date.now()) {
+  acquire(rec, now = Date.now(), capacity = null) {
     const gate = this.canAccept(rec, now)
     if (!gate.ok) return gate
     const id = rec.id
+    if (capacity) {
+      // Synchronous snapshot, recheck and increment: no await between these steps.
+      const dynamicGate = capacityGate(capacity(), this.inflight.get(id) || 0)
+      if (!dynamicGate.ok) return dynamicGate
+    }
     this.inflight.set(id, (this.inflight.get(id) || 0) + 1)
     const arr = this.rpmBuckets.get(id) || []
     arr.push(now)

@@ -435,6 +435,16 @@ export function createRoutingRuntime(ctx) {
     const hasCodexQuota = body?.codex && Object.prototype.hasOwnProperty.call(body.codex, 'quota')
     if (hasCodexQuota) validateOpenAIQuotaPatch(body.codex.quota)
     validateInferenceWebsocketPatch(body)
+    if (
+      body.channel_capacity != null &&
+      (!body.channel_capacity ||
+        !Array.isArray(body.channel_capacity.key_ids) ||
+        body.channel_capacity.key_ids.some((id) => typeof id !== 'string' || !/^key_[a-f0-9]+$/.test(id)))
+    ) {
+      throw Object.assign(new Error('channel_capacity.key_ids must be an array of managed Key IDs'), {
+        code: 'invalid_channel_capacity',
+      })
+    }
     let routingConfig = getRouting()
     const prevOfficialCc = routingConfig.official_cc
     const prevHealthProbe = routingConfig.health_probe
@@ -448,6 +458,7 @@ export function createRoutingRuntime(ctx) {
     if (body.sticky) routingConfig.sticky = { ...(routingConfig.sticky || {}), ...body.sticky }
     if (body.quota) routingConfig.quota = { ...(routingConfig.quota || {}), ...body.quota }
     if (body.concurrency) routingConfig.concurrency = { ...(routingConfig.concurrency || {}), ...body.concurrency }
+    if (body.channel_capacity) routingConfig.channel_capacity = { key_ids: [...new Set(body.channel_capacity.key_ids)] }
     if (body.pool) {
       routingConfig.pool = normalizePoolRouting({ ...(routingConfig.pool || {}), ...body.pool })
     }
