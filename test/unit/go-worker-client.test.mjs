@@ -1359,8 +1359,18 @@ for (const call of [callGoWorker, streamGoWorker]) {
 
 for (const mode of ['first-byte', 'idle']) {
   unixTest(`streamGoWorker enforces ${mode} timeout after kernel headers`, async () => {
-    const fx = await fixture((req, res) => {
-      req.resume()
+    const cancellations = []
+    let hopId
+    const fx = await fixture(async (req, res) => {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      if (req.url === '/internal/v1/cancel') {
+        cancellations.push(payload.request_id)
+        res.end('{"ok":true}')
+        return
+      }
+      hopId = payload.request_id
       res.writeHead(200, { 'content-type': 'text/event-stream' })
       res.flushHeaders()
       if (mode === 'idle') writeData(res, { type: 'response.output_text.delta', delta: 'hello' })
@@ -1378,6 +1388,7 @@ for (const mode of ['first-byte', 'idle']) {
       assert.equal(result.body.error.code, 'worker_timeout')
       assert.match(result.body.error.message, new RegExp(mode))
       assert.equal(result.committed, mode === 'idle')
+      assert.deepEqual(cancellations, [hopId], 'gateway timeout cancels exactly its kernel job before returning')
     } finally {
       clearTimeout(safety)
       controller.abort()
@@ -1385,6 +1396,64 @@ for (const mode of ['first-byte', 'idle']) {
     }
   })
 }
+
+unixTest('nonstream gateway timeout also cancels its kernel job without a caller abort', async () => {
+  const cancellations = []
+  let hopId
+  const fx = await fixture(async (req, res) => {
+    const chunks = []
+    for await (const chunk of req) chunks.push(chunk)
+    const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    if (req.url === '/internal/v1/cancel') {
+      cancellations.push(payload.request_id)
+      res.end('{"ok":true}')
+    } else hopId = payload.request_id
+  })
+  try {
+    const result = await callGoWorker({ exec: fx.exec, envelope: { body: {} }, timeoutMs: 40 })
+    assert.equal(result.body.error.code, 'worker_timeout')
+    assert.deepEqual(cancellations, [hopId])
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('a rejected cancel acknowledgement is visible and does not mask the original failure', async (t) => {
+  const warnings = []
+  t.mock.method(console, 'warn', (line) => warnings.push(line))
+  let cancelled = 0
+  const fx = await fixture((req, res) => {
+    req.resume()
+    if (req.url === '/internal/v1/cancel') {
+      cancelled++
+      res.writeHead(404).end('{"ok":false}')
+    }
+  })
+  try {
+    const result = await callGoWorker({ exec: fx.exec, envelope: { body: {} }, timeoutMs: 40 })
+    assert.equal(result.body.error.code, 'worker_timeout')
+    assert.equal(cancelled, 1)
+    assert.ok(warnings.some((s) => s.includes('status=404 accepted=false')))
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('a successful nonstream hop never sends cancellation', async () => {
+  let requests = 0
+  const fx = await fixture((req, res) => {
+    req.resume()
+    requests++
+    res.end('{"type":"message","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}')
+  })
+  try {
+    const result = await callGoWorker({ exec: fx.exec, envelope: { body: {} }, timeoutMs: 1000 })
+    assert.equal(result.ok, true)
+    assert.equal(requests, 1)
+  } finally {
+    await fx.close()
+  }
+})
 
 unixTest('Codex clients enforce the panel limit on their serialized envelope', async () => {
   let requests = 0

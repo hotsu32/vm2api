@@ -158,27 +158,43 @@ function workerRequest(
 }
 
 /**
- * Client went away: name the hop to the kernel so it cancels that job on the
- * CLI right now. The dropped socket alone left the kernel guessing whether
- * the CLI still owned the job. Best effort: the kernel also sees the drop,
- * and an old worker without the route just answers 404.
+ * Name a failed/aborted hop to the kernel. Destroying its HTTP socket is not
+ * an explicit job cancellation. One bounded, idempotent attempt per hop;
+ * unsupported/non-acknowledged cancels must be visible, not silently ignored.
  */
 function cancelOnAbort(exec, signal, requestId) {
-  if (!signal || signal.aborted) return () => {}
-  const onAbort = () => {
-    workerRequest(exec, {
+  let pending
+  const alreadyAborted = signal?.aborted
+  const cancel = (cause = 'client_abort') => {
+    if (alreadyAborted) return Promise.resolve()
+    if (pending) return pending
+    pending = workerRequest(exec, {
       method: 'POST',
       requestPath: '/internal/v1/cancel',
       body: { request_id: requestId },
       timeoutMs: 3000,
     })
-      .then((res) => res.resume())
-      .catch((error) => {
-        console.warn(`[kernel-cancel] ${exec?.vmId || 'slot'} ${requestId}: ${error?.code || error?.message || error}`)
+      .then(async (res) => {
+        const body = parseJson(await readAll(res, 4096), res.statusCode)
+        const accepted =
+          res.statusCode >= 200 && res.statusCode < 300 && body?.ok !== false && body?.cancelled !== false
+        // Acceptance is not proof that native occupancy has already been released.
+        console[accepted ? 'info' : 'warn'](
+          `[kernel-cancel] ${exec?.vmId || 'slot'} cause=${cause} status=${res.statusCode} accepted=${accepted}`,
+        )
       })
+      .catch((error) => {
+        console.warn(
+          `[kernel-cancel] ${exec?.vmId || 'slot'} cause=${cause} failed=${error?.code || 'transport_error'}`,
+        )
+      })
+    return pending
   }
-  signal.addEventListener('abort', onAbort, { once: true })
-  return () => signal.removeEventListener('abort', onAbort)
+  const onAbort = () => {
+    void cancel()
+  }
+  if (!alreadyAborted) signal?.addEventListener('abort', onAbort, { once: true })
+  return { cancel, stop: () => signal?.removeEventListener('abort', onAbort) }
 }
 
 async function readAll(stream, limit = MAX_BODY) {
@@ -546,7 +562,7 @@ export async function callGoWorker({
     }
   }
   const requestId = randomUUID()
-  const stopCancel = cancelOnAbort(exec, signal, requestId)
+  const cancellation = cancelOnAbort(exec, signal, requestId)
   try {
     const prepared = envelope
       ? { envelope, thread: null }
@@ -592,6 +608,7 @@ export async function callGoWorker({
       threadBetas: prepared.thread,
     })
   } catch (error) {
+    if (error.status !== 413) await cancellation.cancel(signal?.aborted ? 'client_abort' : 'hop_failure')
     return {
       ok: false,
       status: error.status === 413 ? 413 : 0,
@@ -610,7 +627,7 @@ export async function callGoWorker({
       transportError: error.status !== 413,
     }
   } finally {
-    stopCancel()
+    cancellation.stop()
   }
 }
 
@@ -721,7 +738,7 @@ export async function streamGoWorker({
   let committed = false
   const timing = createStreamTiming()
   const requestId = randomUUID()
-  const stopCancel = cancelOnAbort(exec, signal, requestId)
+  const cancellation = cancelOnAbort(exec, signal, requestId)
   try {
     const prepared = envelope
       ? { envelope, thread: null }
@@ -920,6 +937,7 @@ export async function streamGoWorker({
       const complete = !lastError && isCompleteAssistantMessage({ body: assembled, stopReason, sawMessageStop })
       if (!committed && complete) await flushCommit()
       const terminalState = complete ? 'verified' : 'incomplete'
+      if (!complete && !lastError) await cancellation.cancel('incomplete_stream')
       const rateHeaders = mergeRateLimitHeaders({ ...sseRateHeaders, ...headers, ...trailers })
       return restoreUncommittedHop({
         ok: response.statusCode === 200 && !lastError && complete,
@@ -944,6 +962,7 @@ export async function streamGoWorker({
       if (idleTimer) clearInterval(idleTimer)
     }
   } catch (error) {
+    if (error.status !== 413) await cancellation.cancel(signal?.aborted ? 'client_abort' : 'hop_failure')
     if (signal?.aborted) {
       return clientCancelledResult({
         via: 'go-worker-stream',
@@ -971,7 +990,7 @@ export async function streamGoWorker({
       transportError: error.status !== 413,
     }
   } finally {
-    stopCancel()
+    cancellation.stop()
   }
 }
 
