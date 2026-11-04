@@ -1383,7 +1383,7 @@ export class PoolScheduler extends EventEmitter {
     }
   }
 
-  async getWorkerHealth(exec, { signal = undefined, state = null } = {}) {
+  async getWorkerHealth(exec, { signal = undefined, state = null, maxAgeMs = this.config.worker_health_ttl_ms } = {}) {
     if (signal?.aborted) throw makeAbortError()
     if (typeof this.workerHealth !== 'function') return { ok: true, source: 'scheduler-no-health-provider' }
     const cached = this.healthCache.get(exec.vmId)
@@ -1391,7 +1391,7 @@ export class PoolScheduler extends EventEmitter {
       cached &&
       cached.accountId === exec.accountId &&
       Number(state?.credential_generation || 0) <= cached.generation &&
-      Date.now() - cached.at < this.config.worker_health_ttl_ms
+      Date.now() - cached.at < Math.min(maxAgeMs, this.config.worker_health_ttl_ms)
     )
       return cached.value
     const flightKey = `${exec.vmId}:${exec.accountId}`
@@ -1487,7 +1487,7 @@ export class PoolScheduler extends EventEmitter {
           this.maintenanceFlight = null
         })
     }
-    this.maintenanceTimer = setInterval(tick, Math.max(1000, this.config.worker_health_ttl_ms))
+    this.maintenanceTimer = setInterval(tick, Math.max(1000, Math.floor(this.config.worker_health_ttl_ms / 2)))
     this.maintenanceTimer.unref()
     tick()
   }
@@ -1521,7 +1521,12 @@ export class PoolScheduler extends EventEmitter {
     for (const vm of vms) {
       if (this.maintenanceStopped) return
       const accountId = accountIdOf(vm, this.projectRoot)
-      await this.getWorkerHealth(this.executionContext(vm, accountId), { state: snapshots.get(accountId)?.state })
+      // Refresh in the background before strict admission/capacity freshness expires.
+      // Slow/failed probes still expire normally; queries never extend stale health.
+      await this.getWorkerHealth(this.executionContext(vm, accountId), {
+        state: snapshots.get(accountId)?.state,
+        maxAgeMs: this.config.worker_health_ttl_ms / 2,
+      })
     }
     await this.flushHealthWrites()
   }

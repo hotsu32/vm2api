@@ -223,6 +223,31 @@ test('channel capacity reads real quota/health without probes, writes or reserva
   assert.equal(pool.unitCircuit.units.size, 0, 'read-only observation does not initialize circuit state')
 })
 
+test('maintenance refreshes health before capacity snapshots expire', async (t) => {
+  const root = project()
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const now = Date.now()
+  t.mock.method(Date, 'now', () => now)
+  let probes = 0
+  const pool = scheduler(root, {
+    workerHealth: async () => {
+      probes++
+      return { ok: true }
+    },
+  })
+  for (let i = 1; i <= 2; i++)
+    pool.healthCache.set(`vm-0${i}`, {
+      at: now - 3000,
+      accountId: `account-${i}`,
+      generation: 0,
+      value: { ok: true },
+    })
+  await pool.maintain()
+  assert.equal(probes, 2, 'background refresh must not reuse nearly expired cached health')
+  assert.equal(pool.healthCache.get('vm-01').at, now)
+  assert.equal(pool.healthCache.get('vm-02').at, now)
+})
+
 test('scheduler skips a slot whose access is expired and has no refresh', async (t) => {
   const root = project()
   t.after(() => fs.rmSync(root, { recursive: true, force: true }))
